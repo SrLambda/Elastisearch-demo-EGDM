@@ -25,6 +25,24 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+  jupyter:
+    build:
+      context: ./jupyter
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8888:8888"
+    volumes:
+      - ./jupyter/notebooks:/home/jovyan/work
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+    command:
+      - start-notebook.py
+      - --IdentityProvider.token=
+      - --PasswordIdentityProvider.hashed_password=
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
 
 volumes:
   elasticsearch-data:

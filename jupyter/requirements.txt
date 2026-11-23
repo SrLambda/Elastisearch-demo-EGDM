@@ -1,0 +1,4 @@
+elasticsearch>=9,<10
+pandas
+numpy
+matplotlib
