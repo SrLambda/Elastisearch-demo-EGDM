@@ -1,0 +1,322 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{cmap}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish,es-nodecimaldot,es-noshorthands]{babel}
+\usepackage[margin=24mm]{geometry}
+\usepackage{booktabs}
+\usepackage{pgfplots}
+\usepackage[hidelinks]{hyperref}
+\input{glyphtounicode}
+\pdfgentounicode=1
+\pgfplotsset{compat=1.18,
+  barras/.style={xbar,bar width=8pt,width=0.87\linewidth,height=4.5cm,
+    xmin=0,axis lines=left,xmajorgrids,ytick=data,y dir=reverse,
+    enlarge y limits=0.25,tick label style={font=\small},
+    fill=blue!55,draw=blue!65!black},
+  /pgf/number format/use comma,
+  /pgf/number format/1000 sep={\,}}
+\newcommand{\codigo}[1]{\texttt{#1}}
+\newcommand{\fuente}[1]{\par\smallskip\noindent\textit{Fuente:} #1\par}
+
+\hypersetup{pdftitle={Etapa 3: Búsquedas y agregaciones en Elasticsearch},
+  pdfauthor={Camilo Fuentes, Pablo Adasme, María Ignacia Parra Muñoz}}
+
+\begin{document}
+\begin{center}
+{\LARGE\bfseries Etapa 3: Búsquedas y agregaciones en Elasticsearch\par}
+\smallskip
+Camilo Fuentes \quad Pablo Adasme \quad María Ignacia Parra Muñoz
+\end{center}
+
+\section*{Resumen}
+El orden de búsqueda cambió la composición de los diez primeros pedidos sin
+cambiar el total de coincidencias. En vuelos, el límite bajo de conteo devolvió
+una cota inferior y no un total exacto. En registros web, las cuatro estrategias
+coincidieron en los promedios redondeados, pero no en la latencia. Estos resultados
+corresponden a tres índices de ejemplo distintos en una instancia local; no
+constituyen una prueba sobre un conjunto común ni sobre 1~GB de datos o diez
+millones de documentos.
+
+\section{Entorno y reproducción}
+Se utilizó Docker Compose con Elasticsearch y Kibana 9.5.6 y JupyterLab.
+Elasticsearch se ejecutó en un solo nodo, con un límite de 1~GB de RAM para
+su contenedor. Este límite no es el tamaño del conjunto de datos.
+
+\begin{enumerate}
+\setlength{\itemsep}{0pt}
+\item Con Docker en ejecución, acceso a Internet para la primera descarga y
+los puertos 9200, 5601 y 8888 libres, ejecutar desde la raíz del repositorio:
+\begin{verbatim}
+docker compose up -d --build
+docker compose ps
+\end{verbatim}
+\item Abrir \href{http://localhost:5601}{Kibana}, esperar a que esté listo
+y buscar \textit{Integrations} y luego \textit{Sample Data}. Instalar los tres
+conjuntos oficiales si no están cargados. Consultar la
+\href{https://www.elastic.co/docs/manage-data/ingest/sample-data}{guía oficial}
+si cambia la interfaz.
+\item En \textit{Dev Tools} $\to$ \textit{Console}, ejecutar por separado:
+\begin{verbatim}
+GET kibana_sample_data_ecommerce/_count
+GET kibana_sample_data_flights/_count
+GET kibana_sample_data_logs/_count
+\end{verbatim}
+Comprobar \codigo{count} y que \codigo{\_shards.failed} sea 0.
+\item Abrir el
+\href{http://localhost:8888/lab/tree/work/00_indice.ipynb}{cuaderno índice}
+en JupyterLab. Ejecutar primero las celdas de conexión y configuración y
+luego las mediciones y su comparación. El kernel en Compose usa
+\url{http://elasticsearch:9200}; desde el equipo anfitrión se usa
+\url{http://localhost:9200}. Los servicios solo están publicados en la
+interfaz local. Elasticsearch y Jupyter no tienen autenticación en esta
+demostración: no deben exponerse a la red.
+\end{enumerate}
+
+\begin{center}
+\begin{tabular}{llr}
+\toprule
+Conjunto & Índice de Elasticsearch & Documentos\\
+\midrule
+Pedidos & \codigo{kibana\_sample\_data\_ecommerce} & 4\,675\\
+Vuelos & \codigo{kibana\_sample\_data\_flights} & 13\,014\\
+Registros web & \codigo{kibana\_sample\_data\_logs} & 14\,074\\
+\bottomrule
+\end{tabular}
+\end{center}
+Los conteos sin filtro devolvieron un fragmento correcto y ninguno fallido
+por índice. Son conteos locales, no tamaños en disco ni valores garantizados
+para otras instalaciones. Se eligieron muestras oficiales y pequeñas para
+repetir las pruebas en el entorno local y verificar los resultados sin
+preparar una carga masiva. Cada muestra aporta campos adecuados para su
+pregunta; eso no demuestra representatividad a mayor escala.
+
+\paragraph{Demostración en vivo.}
+Conviene iniciar los servicios y comprobar los conteos antes de presentar.
+En los experimentos 1 y 2, copiar en Kibana la petición completa de cada
+medición; contrastar, respectivamente, \codigo{hits.hits} y
+\codigo{hits.total} con la tabla de Jupyter. En el 3, contrastar
+\codigo{aggregations} y ejecutar la sección 5 del cuaderno para medir las
+estrategias. Mantener los mismos parámetros en ambas interfaces. Si la
+instancia no está disponible, presentar las tablas del informe como
+resultados locales anteriores, no como una ejecución en vivo.
+
+\section{Experimento 1: ordenar cambia los primeros diez pedidos}
+\textbf{Autor:} Camilo Fuentes. \textbf{Datos:} pedidos de comercio electrónico.
+
+\paragraph{Pregunta e hipótesis.}
+¿Cómo cambia el importe medio con impuestos de los primeros diez pedidos en
+euros que coinciden con \codigo{clothing} al variar el orden? Se esperaba que
+la media por relevancia quedara entre las obtenidas por importe ascendente
+y descendente.
+
+\paragraph{Diseño.}
+La variable independiente fue el criterio principal de orden:
+\codigo{taxful\_total\_price} ascendente o descendente, o \codigo{\_score}
+descendente. Se mantuvieron fijos el índice, el \codigo{match} de
+\codigo{clothing} en \codigo{category}, el filtro exacto \codigo{currency: EUR},
+\codigo{size: 10} y el desempate por \codigo{order\_id} ascendente.
+La variable dependiente fue la media aritmética de
+\codigo{taxful\_total\_price} de los diez pedidos devueltos, con los importes
+originales de \codigo{\_source}, no los valores indexados usados para ordenar.
+El cuaderno comprueba que el total sea exacto y que haya diez importes válidos
+en EUR; no publica la comparación con resultados parciales.
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Criterio principal & Coincidencias & Pedidos observados & Media (EUR)\\
+\midrule
+Importe ascendente  & 3\,927 & 10 & 15,981\\
+Importe descendente & 3\,927 & 10 & 526,456\\
+Relevancia          & 3\,927 & 10 & 55,980\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[barras,xmax=600,ymin=-0.75,ymax=2.75,
+  yticklabels={Ascendente,Descendente,Relevancia},
+  xlabel={Importe medio con impuestos (EUR)}]
+\addplot coordinates {(15.981,0) (526.456,1) (55.980,2)};
+\end{axis}
+\end{tikzpicture}
+\end{center}
+
+\paragraph{Conclusión.}
+La relevancia quedó entre ambos extremos y la diferencia entre descendente
+y ascendente fue de 510,475~EUR. El orden cambió qué pedidos entraron entre
+los primeros diez, no sus importes ni las 3\,927 coincidencias. Las medias
+describen los diez resultados de cada orden, no todos los pedidos coincidentes
+ni un efecto causal generalizable.
+\fuente{\nolinkurl{jupyter/notebooks/01_busqueda_ordenamiento.ipynb}.}
+
+\clearpage
+\section{Experimento 2: un total puede ser una cota inferior}
+\textbf{Autor:} Pablo Adasme. \textbf{Datos:} vuelos.
+
+\paragraph{Pregunta.}
+¿Cuándo es exacto el total de una búsqueda de vuelos hacia Australia?
+
+\paragraph{Diseño.}
+Solo cambió \codigo{track\_total\_hits}: 10, 1000 o \codigo{true}. Se usó el
+mismo índice y se fijó \codigo{DestCountry: AU}, el rango de
+\codigo{AvgTicketPrice} en $[500,950)$ (incluye 500 y excluye 950) y
+\codigo{size: 0} para omitir los vuelos individuales. Se leyeron juntos
+\codigo{hits.total.value} y \codigo{hits.total.relation}.
+\codigo{eq} indica un total exacto; \codigo{gte}, un límite inferior.
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+\codigo{track\_total\_hits} & Valor & Relación & Lectura\\
+\midrule
+\codigo{10}   & 10  & \codigo{gte} & Al menos 10\\
+\codigo{1000} & 242 & \codigo{eq}  & Exactamente 242\\
+\codigo{true} & 242 & \codigo{eq}  & Exactamente 242\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[width=0.78\linewidth,height=4.2cm,axis lines=left,xmajorgrids,
+  xmin=0,xmax=280,ymin=-0.5,ymax=2.5,y dir=reverse,ytick={0,1,2},
+  yticklabels={10,1000,true},ylabel={\codigo{track\_total\_hits}},
+  xlabel={Coincidencias (valor devuelto)}]
+\addplot[only marks,mark=*,blue!65!black] coordinates {(242,1) (242,2)};
+\draw[->,thick,orange!80!black] (axis cs:10,0) -- (axis cs:36,0);
+\addplot[only marks,mark=o,mark options={fill=white},orange!80!black]
+  coordinates {(10,0)};
+\end{axis}
+\end{tikzpicture}
+\par\small Círculo relleno: total exacto. Círculo vacío con flecha:
+cota inferior; la longitud de la flecha no representa un conteo.
+\end{center}
+
+\paragraph{Conclusión.}
+Hubo 242 coincidencias para el filtro fijo. El umbral 10 no acreditó el
+total exacto; el de 1000 coincidió con la referencia \codigo{true}.
+Esto no demuestra que el umbral 1000 sea suficiente para otros filtros
+ni mide la latencia de las opciones.
+
+\paragraph{Comprobación adicional del cuaderno.}
+El anexo A realiza otras tres consultas con \codigo{/\_count}: mantiene
+\codigo{AU} y cambia el rango de precio. Dio 70 vuelos en $[500,650)$,
+76 en $[650,800)$ y 96 en $[800,950)$. Los intervalos no se solapan y
+suman 242; el último tuvo 20 vuelos más que el siguiente por conteo.
+Este anexo no forma parte de la comparación de umbrales.
+\fuente{\nolinkurl{jupyter/notebooks/02_experimento.ipynb}.}
+
+\clearpage
+\section{Experimento 3: estrategias para agrupar y promediar}
+\textbf{Autora:} María Ignacia Parra Muñoz. \textbf{Datos:} registros web.
+
+\paragraph{Pregunta e hipótesis.}
+Al agrupar registros web por código de respuesta HTTP (200, 404, 503)
+y calcular el promedio de bytes transferidos, ¿cuánto cambia el tiempo de
+respuesta según la forma interna en que Elasticsearch ejecuta el cálculo?
+Se esperaba que la caché obtuviera la menor latencia al repetir la misma
+consulta y que, sin caché, leer columnas preparadas (\codigo{doc\_values})
+fuera más rápido que calcular el código al vuelo leyendo el JSON original.
+
+\paragraph{Diseño.}
+La variable independiente fue la estrategia de ejecución:
+\begin{enumerate}
+\item \textbf{Caché activa} (\codigo{request\_cache=true}): reutiliza el
+resultado de la petición repetida a nivel de fragmento.
+\item \textbf{Estándar sin caché} (\codigo{global\_ordinals}): lee
+\codigo{doc\_values} y agrupa con identificadores enteros de los códigos.
+\item \textbf{Tabla hash sin caché} (\codigo{execution\_hint: "map"}): lee
+\codigo{doc\_values} y agrupa directamente los valores en una tabla hash.
+\item \textbf{Cálculo al vuelo sin caché} (\codigo{runtime\_mappings}):
+crea un campo temporal para el código HTTP leyendo \codigo{\_source}
+y ejecutando un script Painless por registro.
+\end{enumerate}
+Se mantuvieron fijos el índice, la agrupación \codigo{terms} por código HTTP
+(hasta cinco grupos), el promedio \codigo{avg} de \codigo{bytes},
+\codigo{size: 0} y el mismo contenedor de un nodo con 1~GB de RAM.
+
+\paragraph{Medición.}
+Se hicieron 20 repeticiones tras tres ejecuciones de calentamiento por
+configuración. Se registraron la latencia total mediana desde Python y el
+\codigo{took} medio de Elasticsearch. En otras 20 peticiones por estrategia
+sin caché se registró la mediana de la suma de tiempos de agregación
+reportados por la API Profile. Es una medición instrumentada, no un tiempo
+puro del motor ni un componente que deba restarse de la latencia total.
+No se perfiló la configuración con caché.
+
+\paragraph{Resultados.}
+Las cuatro configuraciones devolvieron los mismos códigos y promedios al
+redondear a dos decimales: 5\,897,85 bytes (200), 5\,049,24 bytes (404)
+y 0,00 bytes (503).
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Configuración & Mediana total (ms) & \codigo{took} medio (ms) & Profile ($\mu$s)\\
+\midrule
+Caché activa  & 3,28  & 1,05  & No aplica\\
+Estándar      & 3,72  & 1,05  & 1\,145,6\\
+Tabla hash    & 5,72  & 2,50  & 2\,074,2\\
+Al vuelo      & 94,02 & 91,75 & 93\,962,4\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\clearpage
+\subsection*{Comparación de latencia y perfil}
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[barras,xmax=100,ymin=-0.75,ymax=3.75,
+  yticklabels={Caché,Estándar,Hash,Al vuelo},
+  xlabel={Latencia total mediana (ms)}]
+\addplot coordinates {(3.28,0) (3.72,1) (5.72,2) (94.02,3)};
+\end{axis}
+\end{tikzpicture}
+
+\begin{tikzpicture}
+\begin{axis}[barras,xmax=100000,ymin=-0.75,ymax=2.75,scaled x ticks=false,
+  xticklabel style={/pgf/number format/fixed},
+  xtick={0,25000,50000,75000,100000},
+  yticklabels={Estándar,Hash,Al vuelo},
+  xlabel={Mediana de agregación instrumentada ($\mu$s)}]
+\addplot coordinates {(1145.6,0) (2074.2,1) (93962.4,2)};
+\end{axis}
+\end{tikzpicture}
+\end{center}
+
+\paragraph{Conclusión.}
+En esta prueba, el cálculo al vuelo tardó 94,02~ms en total y registró
+unas 82 veces el tiempo de agregación perfilado del estándar. En esta
+implementación, leer \codigo{\_source} y ejecutar Painless por registro
+añade trabajo a cambio de poder definir grupos sin reindexar. La tabla
+hash registró unas 1,8 veces el tiempo perfilado del estándar: ambos
+leyeron \codigo{doc\_values}, pero el estándar agrupó mediante identificadores
+enteros en lugar de usar los valores de texto como claves.
+La caché obtuvo la menor mediana total (3,28~ms), frente a 3,72~ms del
+estándar y casi 29 veces menos que los 94,02~ms del cálculo al vuelo.
+El \codigo{took} medio fue el mismo con caché y con el método estándar;
+la medición desde Python incluye sobrecarga fuera del motor, pero estas
+mediciones no aíslan el costo del viaje HTTP.
+\fuente{\nolinkurl{informe.md} y sección 5 de
+\nolinkurl{jupyter/notebooks/03_experimento.ipynb}. Gráficos reproducidos
+con los valores reportados, no con una nueva medición.}
+
+\section{Escalabilidad: plan, no resultado}
+Como hipótesis para registros web, el informe original proyecta
+\emph{más de un minuto} para el cálculo al vuelo con diez millones de
+registros en un nodo. Es una extrapolación sin medir: multiplicar
+aproximadamente 94~ms por 700 supone un crecimiento lineal bajo condiciones
+constantes. No se verificó esa latencia ni el tamaño en disco a ese volumen.
+
+Para probarlo, se propone aumentar el volumen por etapas y comparar las
+mismas agregaciones con y sin un filtro temporal acotado, con
+\codigo{doc\_values} y con campo al vuelo, separando caché fría de caliente.
+Después se podría distribuir el índice en varios fragmentos primarios
+en distintos nodos para comparar el trabajo local y la reducción final.
+Registrar volumen real, tamaño en disco, configuración y latencias
+permitiría verificar si el paralelismo y la caché de consultas repetitivas
+aportan las mejoras previstas.
+
+\end{document}
